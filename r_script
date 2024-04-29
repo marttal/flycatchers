@@ -1,0 +1,1088 @@
+# Collared flycatcher data analysis 
+# GM and reproductive success
+# Liukkonen Martta et al. 
+
+#Download packages
+library(BiocManager)
+library(biomformat)
+library(devtools)
+library(summarytools)
+library(lme4)
+library(lmerTest)
+library(tidyverse)
+library(dplyr)
+library(car)
+library(ape)
+library(ggpubr) ### Needed for some plotting stuff
+library(dendextend)
+library(phyloseq)
+library(decontam)
+library(microbiome)
+library(picante)
+library(decontam)
+library(Hmisc)
+library(tidyr)
+library(ggplot2) #### For making plots
+library(hrbrthemes) #### Make a pretty plot
+library(viridis) #### colour palettes that are CB friendly
+library(readxl)
+library(vegan)
+library(DESeq2)
+library(DHARMa)
+library(modelr)
+
+setwd("/Users/marannli/Desktop/flycatchers") ### set working directory
+library(qiime2R)
+SVs<-read_qza("table-final-clean_25_210_novaseq.qza")
+#To access the actual data stored within the object, access the data as below:
+SVs$data[1:5,1:5] #Each row denotes a sequence variant where in the actual text is the hash of the complete sequence
+#Make phyloseq object by importing the QIIME2 artifacts into R using qiime2R package
+metadata<-readr::read_tsv("Novaseq_metadata.tsv") #Import metadata
+taxonomy<-read_qza("taxonomy-25_210_novaseq.qza") #Read taxonomy
+taxonomy<-parse_taxonomy(taxonomy$data)
+head(taxonomy)
+
+#Create phyloseq object
+ps<-qza_to_phyloseq(features = "table-final-clean_25_210_novaseq.qza", 
+                    tree = "rooted-tree-25_210_novaseq.qza",
+                    taxonomy = "taxonomy-25_210_novaseq.qza",
+                    metadata = "Novaseq_metadata.tsv")
+ps
+
+## RUN DECONTAM
+sample_data(ps)$is.neg <- sample_data(ps)$sample_or_control == "control"
+contamdf.prev <- isContaminant(ps, method="prevalence", neg="is.neg")
+table(contamdf.prev$contaminant)
+head(which(contamdf.prev$contaminant))
+
+# default threshold above is 0.1. I usually use 0.05 to be on the conservative side.
+contamdf.prev05 <- isContaminant(ps, method="prevalence", neg="is.neg", threshold=0.05)
+table(contamdf.prev05$contaminant)
+
+#Make phyloseq object of presence-absence in negative controls
+ps.neg <- prune_samples(sample_data(ps)$sample_or_control == "control", ps)
+ps.neg.presence <- transform_sample_counts(ps.neg, function(abund) 1*(abund>0))
+# Make phyloseq object of presence-absence in positive samples
+ps.pos <- prune_samples(sample_data(ps)$sample_or_control == "sample", ps)
+ps.pos.presence <- transform_sample_counts(ps.pos, function(abund) 1*(abund>0))
+# combine dataframes of prevalence in positive and negative samples
+df.pres <- data.frame(prevalence.pos=taxa_sums(ps.pos.presence), prevalence.neg=taxa_sums(ps.neg.presence),
+                      contam.prev=contamdf.prev$contaminant)
+
+#Next you download this dataframe to do some stuff manually. 
+write.csv(df.pres, "ps_decontam.csv")
+
+#You will have a dataframe with a column that said true or false. True means it is the ASV is a likely contaminant.
+#NOTE! If the sequence processing has been done in QIIME2, the sequences have ID numbers instead of "normal" DNA code.
+#now we remove those bad sequences from the phyloseq object
+
+# Remove contaminants
+# These badTaxa are identified from the ps_decontam.csv file labelled as TRUE
+
+### The following is to list the bad taxa into "badTaxa" is to remove badTaxa.
+### List of taxa is in the created csv file
+badTaxa = c("taxa codes here")
+
+#### new phyloseq object without the contaminants.
+allTaxa = taxa_names(ps)
+allTaxa <- allTaxa[!(allTaxa %in% badTaxa)]
+ps_new = prune_taxa(allTaxa, ps)
+summarize_phyloseq(ps_new)
+
+## DONE DECONTAM ##
+
+# next, phyloseq
+
+mean(sample_sums(ps_new))
+sd(sample_sums(ps_new))
+
+### Remove test samples
+physeq <- subset_samples(ps_new, sample_or_duplicate == "sample")
+physeq <- subset_samples(physeq, sample_or_control == "sample")
+physeq ### Gives a summary of the phyloseq object
+sort(sample_sums(physeq))
+mean(sample_sums(physeq))
+summarize_phyloseq(physeq) ### Gives a more detailed summary of the phyloseq object
+
+### Less than 100 ASVs -->  they can be contaminants so we usually remove these ASVs from the dataset
+physeq <- prune_samples(sample_sums(physeq) >= 100, physeq)
+
+mdata = as(sample_data(physeq), "data.frame") ### Makes metadata file
+attach(mdata) ### Inserts metadata file
+
+### List unique phylum level groups
+head(get_taxa_unique(physeq, "Phylum"))
+head(get_taxa_unique(physeq, "Genus"))
+
+### Plot the samples to see problems
+hist(sample_sums(physeq), main="Histogram: Read Counts", xlab="Reads ", 
+     border="blue", col="green", las=1, breaks=12)
+### Absolute abundances
+asv.absolute <- abundances(physeq)
+# Relative abundances
+asv.relative <- abundances(physeq, "compositional")
+### Total read counts
+reads_sample <- readcount(physeq)
+### Adding read per sample to phyloseq object metadata
+sample_data(physeq)$reads_sample <- reads_sample
+### Melting phyloseq data for easier plotting
+### psmelt combines your metadata with bacterial taxa
+ps_melt <- psmelt(physeq)
+kable(head(ps_melt))
+
+table(ps_melt$Phylum)
+
+### Sample names and variables
+head(sample_names(physeq))
+s <- sample_sums(physeq)
+
+### Calculate diversity for samples
+div <- microbiome::alpha(physeq, index = "shannon")
+### Assign the estimated diversity to sample metadata
+sample_data(physeq)$diversity <- div
+### Number of taxa
+n <- ntaxa(physeq)
+### Most abundant taxa
+topx <- top_taxa(physeq, n = 10)
+### Names
+ranks <- rank_names(physeq)
+taxaASV <- taxa(physeq)
+### List unique phylum level groups
+head(get_taxa_unique(physeq, "Phylum"))
+length(get_taxa_unique(physeq, taxonomic.rank = "Phylum")) ##### 33 different phyla
+#### or genera
+head(get_taxa_unique(physeq, "Genus"))
+length(get_taxa_unique(physeq, taxonomic.rank = "Genus")) #### 1018 different genera
+
+percentages_glom<-tax_glom(physeq, taxrank = "Family")
+view(percentages_glom@tax_table)
+
+#### Check taxa prevalence
+taxa_prevalence <- plot_taxa_prevalence(physeq, "Phylum")+theme_classic()+scale_colour_viridis_d(option="H")
+
+#### Check taxa prevalence for the most abundant phyla
+r_top_phyla <- subset_taxa(physeq, 
+                           Phylum=="Firmicutes" | Phylum=="Proteobacteria" | Phylum=="Actinobacteria")
+top_taxa_prevalence<-plot_taxa_prevalence(r_top_phyla, "Class")+theme_classic()+scale_colour_viridis_d(option="H")
+
+#### Firmicutes only
+ps_firmicutes <- subset_taxa(physeq, 
+                           Phylum=="Firmicutes")
+firmicutes_prevalence<-plot_taxa_prevalence(ps_firmicutes, "Order")+theme_classic()+scale_colour_viridis_d(option="H")
+
+#### Actinobacteria only
+ps_actinobacteria <- subset_taxa(physeq, 
+                             Phylum=="Actinobacteria")
+actinobacteria_prevalence<-plot_taxa_prevalence(ps_actinobacteria, "Order")+theme_classic()+scale_colour_viridis_d(option="H")
+
+#### Proteobacteria only
+ps_proteobacteria <- subset_taxa(physeq, 
+                                 Phylum=="Proteobacteria")
+proteobacteria_prevalence<-plot_taxa_prevalence(ps_proteobacteria, "Order")+theme_classic()+scale_colour_viridis_d(option="H")
+
+metadata = as(sample_data(physeq), "data.frame")
+attach(metadata)
+
+richness <- estimate_richness(physeq, measures=c("Observed", "Chao1", "Shannon", "ACE", "Simpson", "InvSimpson"))
+### Combine richness with sample data
+richness <- data.frame(richness, sample_data(physeq))
+
+Shannon_all <- ggplot(data, aes(x=ring, y=Shannon)) +
+  theme(panel.background = element_rect(color="black",fill = "white"),panel.grid.major = element_blank(),panel.grid.minor = element_blank())+
+  ylim(0, 5.5)+geom_boxplot(outlier.shape = NA)+
+  theme(axis.text=element_text(size=10))+ 
+  xlab("Bird ID")+ylab("Shannon Diversity Index") + 
+  theme(plot.title = element_text(size=10),axis.title.x = element_text(size=12),axis.title.y = element_text(size=12)) + 
+  theme(axis.text.x = element_text(color="black"))+
+  theme(axis.text.y = element_text(color="black"),legend.key = element_rect(fill = "white", size=12))+ labs(fill = " ")+
+  scale_fill_brewer(palette = "Set2")
+Shannon_all
+
+Chao1_all <- ggplot(data, aes(x=ring, y=Chao1)) +
+  theme(panel.background = element_rect(color="black",fill = "white"),panel.grid.major = element_blank(),panel.grid.minor = element_blank())+
+  ylim(0, 1000)+geom_boxplot(outlier.shape = NA)+
+  theme(axis.text=element_text(size=10))+ 
+  xlab("Bird ID")+ylab("Chao1 Richness") + 
+  theme(plot.title = element_text(size=10),axis.title.x = element_text(size=12),axis.title.y = element_text(size=12)) + 
+  theme(axis.text.x = element_text(color="black"))+
+  theme(axis.text.y = element_text(color="black"),legend.key = element_rect(fill = "white", size=12))+ labs(fill = " ")+
+  scale_fill_brewer(palette = "Set2")
+Chao1_all
+
+### Save file
+write_xlsx(richness,"~/Desktop/flycatchers/betadata.xlsx")
+
+#### Plot taxa abundance (absolute)
+ps_melt$Phylum <- as.character(ps_melt$Phylum)
+plot_absolute_abund<-tax_glom(physeq, taxrank="Phylum")
+absolute_abund<-psmelt(plot_absolute_abund)
+absolute_abund$Phylum<-as.character(absolute_abund$Phylum)
+absolute_abund$Phylum[absolute_abund$Abundance < 0.15] <- " < 15% abundance"
+
+ggplot(absolute_abund, aes(x=ID, y=Abundance, fill=fct_reorder(Phylum, Abundance)))+
+  geom_bar(stat="identity")+
+  xlab("Sample ID")+
+  theme_classic()+
+  scale_fill_viridis_d(option="H")+
+  xlab("Bird ID")+ylab("Absolute bacterial abundance") + 
+  theme(legend.key=element_blank(), legend.text=element_text(color="black", size=12))+ 
+  theme(legend.title = element_text(color="black", size=12,face="bold"))+ guides(colour = guide_legend(order = 1),shape = guide_legend(order = 2))+
+  theme(axis.text.x = element_text(color="black", size=12, face="bold"))+
+  theme(axis.text.y = element_text(color="black", size=12,face="bold"))+
+  theme(axis.title.x = element_text(color="black", size=12, face="bold"))+
+  theme(axis.title.y = element_text(color="black", size=12, face="bold"))
+
+#### Plot taxa abundance (relative)
+plot = filter_taxa(physeq, function(x) mean (x) > 0.1, TRUE)
+plot
+relative = transform_sample_counts(plot, function(x) x / sum(x))
+relative
+plot <- psmelt(relative)
+glom <- tax_glom(relative, taxrank = "Phylum")
+diversity <- psmelt(glom)
+diversity$Phylum <- as.character(diversity$Phylum)
+diversity$Phylum[diversity$Abundance < 0.1] <- " < 10% abundance"
+
+p<-ggplot(diversity, aes(x=ID, y=Abundance, fill=fct_reorder(Phylum, Abundance)))+
+  geom_bar(stat="identity", position="fill")+
+  facet_wrap(~sex, scales= "free_x", nrow=1) +
+  xlab("Sample ID")+
+  theme(panel.background = element_rect(color="white",fill = "white"),panel.grid.major = element_blank(),panel.grid.minor = element_blank())+
+  scale_fill_viridis_d(option="H")+
+  xlab("Bird ID")+ylab("Relative bacterial abundance") + 
+  theme(legend.position = "right", legend.title=element_text(size=14, face="bold"))+
+  theme(legend.key=element_blank(), legend.text=element_text(color="black", size=12, face="bold"))+ 
+  theme(legend.title = element_text(color="black", size=14,face="bold"))+
+  theme(axis.text.x = element_text(color="black", size=14,face="bold"))+
+  theme(axis.text.y = element_text(color="black", size=14,face="bold"))+
+  theme(axis.title.x = element_text(color="black", size=14,face="bold"))+
+  theme(axis.title.y = element_text(color="black", size=14,face="bold"))
+
+##### Make plot
+
+
+### Plot tree
+plot_tree(physeq, color = "Phylum", label.tips = "Phylum", 
+          size = "abundance", plot.margin = 0.5, ladderize = TRUE)
+
+## --------------------------- RAREFACTION --------------------- ##
+
+###First, plot the rarefaction curves
+asv_tab <- t(abundances(physeq))
+curves <- vegan::rarecurve(asv_tab, step=20, label = FALSE, sample = min(rowSums(asv_tab), col = "blue", cex = 0.5))
+
+### Curves plateau a bit before 2000 so rarefy at 2000
+
+physeq_rare = rarefy_even_depth(physeq, sample.size =2000)
+#### 2 samples are removed as they have less than 2000 ASVs: CF_198, CF_90
+#### these 2 samples were much lower than the other samples
+##### 14 618 OTUs were removed because they are no longer 
+##### present in any sample after random subsampling
+
+### Update metadata for rarefied dataset
+metadata_rare = as(sample_data(physeq_rare), "data.frame")
+attach(metadata_rare)
+
+metadata_rare <- estimate_richness(physeq_rare, measures=c("Observed", "Chao1", "Shannon", "ACE", "Simpson", "InvSimpson"))
+# Combine richness with sample data
+metadata_rare <- data.frame(metadata_rare, sample_data(physeq_rare))
+### Save file
+write_xlsx(metadata_rare,"~/Desktop/flycatchers/rarefied_metadata.xlsx")
+### Read in for correct variable conversions
+
+ps_melt <- psmelt(physeq_rare)
+
+phyloGlom = tax_glom(physeq_rare, "Phylum")
+glomTax = tax_table(phyloGlom)[,"Phylum"]
+glomOTU = otu_table(phyloGlom)
+glomTable = merge(glomOTU,glomTax,by=0,all=TRUE)
+rownames(glomTable) = glomTable[,"Phylum"]
+glomTable$Row.names = NULL
+glomTable$Phylum = NULL
+
+glomTable2 = glomTable / rep(colSums(glomTable), each = nrow(glomTable)) #### percentages per column
+glomTable3 = as.data.frame(t(glomTable2))
+ggplot(glomTable3,aes(Bacteroidetes, Firmicutes)) + 
+  theme_bw() +
+  geom_point(size=2) ##### CFs have a lot of Firmicutes but very few Bacteroidetes!!!
+
+## Check summary
+physeq_rare
+summarize_phyloseq(physeq_rare)
+
+### Other plots to inspect the data
+#####Agglomerate to phylum-level and rename
+ps_phylum <- phyloseq::tax_glom(physeq, "Phylum")
+phyloseq::taxa_names(ps_phylum) <- phyloseq::tax_table(ps_phylum)[, "Phylum"]
+phyloseq::otu_table(ps_phylum)[1:5, 1:5]
+#####Melt and plot
+abundance_plot<-phyloseq::psmelt(ps_phylum) %>%
+  ggplot(aes(x = area, y = Abundance)) +
+  geom_boxplot(outlier.shape  = NA) +
+  geom_jitter(aes(color = OTU), height = 0, width = .2) +
+  labs(x = "", y = "Abundance\n") +
+  facet_wrap(~ OTU, scales = "free")
+, shape=sex), size=3) + theme(legend.position = "right")+
+  scale_colour_viridis_d()
+
+# -------------------- STATISTICAL ANALYSES ---------------- #
+
+## 185 samples in total
+
+### Read in the metadata if you have edited anything
+library(readxl)
+data <- read_excel("rarefied_metadata.xlsx", 
+                   col_types = c("numeric", "numeric", "numeric", 
+                                 "numeric", "numeric", "numeric", 
+                                 "numeric", "numeric", "text", "text", 
+                                 "text", "text", "text", "text", "numeric", 
+                                 "text", "text", "text", "text", "text", 
+                                 "text", "text", "text", "numeric", 
+                                 "text", "text", "numeric", "numeric", 
+                                 "numeric", "numeric", "numeric", 
+                                 "numeric", "numeric", "numeric", 
+                                 "numeric", "numeric", "text", "numeric", 
+                                 "numeric", "numeric", "numeric", 
+                                 "numeric", "numeric", "numeric", 
+                                 "numeric", "numeric", "text", "text"))
+
+data$ring<- factor(data$ring) ### bird ID
+data$area<- factor(data$area) ### sampling area
+data$AREA<- factor(data$AREA) ### sampling area
+data$sex<- factor(data$sex)
+data$survival<- factor(data$survival)
+data<-subset(data, data$sample_or_duplicate != "duplicate") ####remove duplicates which were used to verify sequencing accuracy
+data$age_group_exact<- factor(data$age_group_exact) #### Groups are  1) 1 year olds, 2) 1.5-4 year olds, and 3) 4.5 and higher
+data$age_group_alt<- factor(data$age_group_alt) #### Groups are 1) 1-1.5 year olds, 2) 2-4 year olds, and 3) 4.5 and higher
+
+#### age_group_alt differs from age_group_exact = in alt 1.5 year olds are grouped with 1 year old birds. In exact age, 1.5 year olds are grouped with 2-4 year olds.
+#### Group age: 1 and 1.5, 2-3.5, 4 and higher SO three age groups
+
+table(data$sex) #### 122 females, 63 males
+table(data$sex, data$survival)
+####        no yes
+#### female 82  40
+#### male   45  18
+
+### Check for distribution --> normal or not?
+library(ggpubr)
+#### All look normally distributed
+ggqqplot(data$fledge)
+ggqqplot(data$LRS)
+ggqqplot(data$body_condition)
+ggqqplot(data$Shannon)
+ggqqplot(data$HD)
+
+## Calculate body condition index for birds tarsus ~ wing lenght
+bodycondition<-lm(tarsus ~ weight, data=data) ####extract individual residuals
+summary(bodycondition) #Prints rediduals per birdID
+###Extract residuals
+bd<-bodycondition$residuals
+plot(fitted(bodycondition), bd)
+abline(0,0)
+data<-add_residuals(data, bodycondition, var="body_condition") #### Adds residuals to dataframe. Requires modelr package !
+
+### Make subsets of data for LRS and survival analyses, where PA area is removed --> the data from that area is lacking and cannot be analyzed 
+lrs_subset_data<-subset(data, data$area != "PA" | data$AREA != "PA")
+##### Check data
+table(lrs_subset_data$area) ##### PA and GR are excluded now
+
+## ALL DATA
+### mixed models are used as we use area as a random effect
+## QUESTION 1: Does diversity associate with survival to next year
+
+### GLMER with survived=yes and did not survive=no
+######shannon
+fit1<-glmer(survival ~ Shannon + sex + body_condition + age_group_exact + (1|AREA), family=binomial, data=lrs_subset_data) ###what other factors we want?
+vif(fit1)
+summary(fit1)
+anova(fit1, type = 3) #### Not significant
+
+#### Random effect proportion
+
+
+fit1_1<-glmer(survival ~ Chao1 + sex + body_condition + age_group_exact + (1|AREA), family=binomial, data=lrs_subset_data) ###what other factors we want?
+vif(fit1_1)
+summary(fit1_1)
+anova(fit1_1, type = 3) #### Not significant
+
+plot2+geom_cat(aes(survival, Shannon), cat = "shironeko", size = 3)
+plot1+geom_dog(aes(survival, Shannon), dog = "husky", size = 5)
+
+## QUESTION 2: Does GM predict fledging success in 2015 (ARS)
+fit2<-lmer(fledge ~ Shannon + sex + body_condition + age_group_exact + HD + (1|AREA), data = data)
+vif(fit2)
+summary(fit2)
+anova(fit2, type = 3) ### Shannon is significant but there is only a super minor association!
+
+plot2<-ggplotRegression(lm(fledge ~ Shannon, data = data))+
+  geom_point(width = 0.1, size = 1) +
+  geom_smooth(method='lm', col = "black", fill="cyan", se=TRUE) +
+  theme_classic()+
+  xlab("Shannon Diversity Index")+ylab("Annual reproductive success in all birds") + 
+  theme(plot.title = element_text(size=10, face="bold"),axis.title.x = element_text(size=14, face="bold"),axis.title.y = element_text(size=14, face="bold")) + 
+  theme(axis.text.x = element_text(size=14, color="black", face="bold"))+
+  theme(axis.text.y = element_text(size=14, color="black", face="bold"),legend.key = element_rect(fill = "white", size=12))+ labs(fill = "fledge")
+
+ggplotRegression(lm(fledge ~ body_condition, data = data))+
+  geom_point(width = 0.1, size = 1) +
+  geom_smooth(method='lm', col = "black", fill="cyan", se=TRUE) +
+  theme_classic()+
+  xlab("BD")+ylab("Annual reproductive success in all birds") + 
+  theme(plot.title = element_text(size=10, face="bold"),axis.title.x = element_text(size=14, face="bold"),axis.title.y = element_text(size=14, face="bold")) + 
+  theme(axis.text.x = element_text(size=14, color="black", face="bold"))+
+  theme(axis.text.y = element_text(size=14, color="black", face="bold"),legend.key = element_rect(fill = "white", size=12))+ labs(fill = "fledge")
+
+fit2_2<-lmer(fledge ~ Chao1 + sex + body_condition + age_group_exact + HD + (1|AREA), data = data)
+vif(fit2_2)
+summary(fit2_2)
+anova(fit2_2, type = 3) ###### only HD is significant but this was expected
+
+## QUESTION 3: Does GM predict lifetime reproductive success?
+
+fit3<-lmer(LRS ~ Shannon + sex + body_condition + age_group_exact + HD + (1|AREA), data = lrs_subset_data)
+vif(fit3)
+summary(fit3)
+anova(fit3, type = 3) ### Diversity does not predict LRS. HD is significant!
+
+fit3_3<-lmer(LRS ~ Chao1 + sex + body_condition + age_group_exact + HD + (1|AREA), data = lrs_subset_data)
+vif(fit3_3)
+summary(fit3_3)
+anova(fit3_3, type = 3) ###### HD is significant as expected
+
+
+## SUBSET DATA
+## FEMALES
+females<-subset(data, data$sex == "female")
+### And another subset for the LRS without PA and GR
+females_lrs_subset<-subset(females, females$area != "PA" | females$AREA != "PA")
+females_lrs_subset<-subset(females_lrs_subset, females_lrs_subset$survival!= "")
+
+fit4<-glmer(survival ~ Shannon + body_condition + age_group_exact + (1|AREA), family=binomial, data=females_lrs_subset)
+vif(fit4)
+summary(fit4)
+anova(fit4, type = 3) #### Not significant
+
+fit4_4<-glmer(survival ~ Chao1 + body_condition + age_group_exact + (1|AREA), family=binomial, data=females_lrs_subset)
+vif(fit4_4)
+summary(fit4_4)
+car::Anova(fit4_4, type = 3) ####not significant + errors due to NA values
+
+fit5<-lmer(fledge ~ Shannon + body_condition + age_group_exact + HD + (1|AREA), data = females) #### Lisää tänne HD (kuoriutumispäivä!!!!) Kaikkin malleihin, jossa selitetään fledgeä!!
+vif(fit5)
+summary(fit5)
+anova(fit5, type = 3) ### HD is significant!!!
+
+fit5_5<-lmer(fledge ~ Chao1 + body_condition + age_group_exact + HD + (1|AREA), data = females) #### Lisää tänne HD (kuoriutumispäivä!!!!) Kaikkin malleihin, jossa selitetään fledgeä!!
+vif(fit5_5)
+summary(fit5_5)
+anova(fit5_5, type = 3) ### HD is significant!!!
+
+fit6<-lmer(LRS ~ Shannon + body_condition + age_group_exact + HD + (1|AREA), data = females_lrs_subset)
+vif(fit6)
+summary(fit6)
+anova(fit6, type = 3) ### HD is significant
+
+fit6_6<-lmer(LRS ~ Chao1 + body_condition + age_group_exact + HD + (1|AREA), data = females_lrs_subset)
+vif(fit6_6)
+summary(fit6_6)
+anova(fit6_6, type = 3) ### HD is significant
+
+## MALES
+males<-subset(data, data$sex == "male")
+### And another subset for the LRS without PA and GR
+males_lrs_subset<-subset(males, males$area != "PA" | males$AREA != "PA")
+table(males_lrs_subset$area)
+
+fit7<-glmer(survival ~ Shannon + body_condition + age_group_exact + (1|area), family=binomial, data=males_lrs_subset)
+vif(fit7)
+summary(fit7)
+anova(fit7, type = 3) #### Nothing is significant
+
+fit7_7<-glmer(survival ~ Chao1 + body_condition + age_group_exact + (1|area), family=binomial, data=males_lrs_subset)
+vif(fit7_7)
+summary(fit7_7)
+anova(fit7_7, type = 3) #### Nothing is significant
+
+fit8<-lmer(fledge ~ Shannon + body_condition + age_group_exact + HD + (1|AREA), data = males)
+vif(fit8)
+summary(fit8)
+anova(fit8, type = 3) #### Shannon is significant
+
+plot6<-ggplotRegression(lm(fledge ~ Shannon, data = males))+
+  geom_point(width = 0.1, size = 1) +
+  geom_point(width = 0.1, size = 1) +
+  geom_smooth(method='lm', col = "black", fill="cyan", se=TRUE) +
+  theme_classic()+
+  xlab("Shannon Diversity Index")+ylab("Annual reproductive success in males") + 
+  theme(plot.title = element_text(size=10, face="bold"),axis.title.x = element_text(size=14, face="bold"),axis.title.y = element_text(size=14, face="bold")) + 
+  theme(axis.text.x = element_text(size=14, color="black", face="bold"))+
+  theme(axis.text.y = element_text(size=14, color="black", face="bold"),legend.key = element_rect(fill = "white", size=12))+ labs(fill = "fledge")
+
+plot6_2<-ggplotRegression(lm(fledge ~ Shannon, data = females))+
+  geom_point(width = 0.1, size = 1) +
+  geom_point(width = 0.1, size = 1) +
+  geom_smooth(method='lm', col = "black", fill="cyan", se=TRUE) +
+  theme_classic()+
+  xlab("Shannon Diversity Index")+ylab("Annual reproductive success in females") + 
+  theme(plot.title = element_text(size=10, face="bold"),axis.title.x = element_text(size=14, face="bold"),axis.title.y = element_text(size=14, face="bold")) + 
+  theme(axis.text.x = element_text(size=14, color="black", face="bold"))+
+  theme(axis.text.y = element_text(size=14, color="black", face="bold"),legend.key = element_rect(fill = "white", size=12))+ labs(fill = "fledge")
+
+
+ARS_fig2<-ggarrange(plot6, plot6_2, plot2,
+          labels = c("A", "B", "C"),
+          ncol = 2, nrow = 2)
+
+fit8_8<-lmer(fledge ~ Chao1 + body_condition + age_group_exact + HD + (1|AREA), data = males)
+vif(fit8_8)
+summary(fit8_8)
+anova(fit8_8, type = 3) #### Chao1 is not significant
+
+fit9<-lmer(LRS ~ Shannon + body_condition + age_group_exact + HD + (1|AREA), data = males_lrs_subset)
+vif(fit9)
+summary(fit9)
+anova(fit9, type = 3) ### Shannon associates with LRS !!!!
+
+plot7<-ggplotRegression(lm(LRS ~ Shannon, data = males_lrs_subset))+
+  geom_point(width = 0.1, size = 1) +
+  geom_smooth(method='lm', col = "black", fill="cyan", se=TRUE) +
+  theme_classic()+
+  ylab("Lifetime reproductive success in males")+xlab("Shannon Diversity Index") + 
+  theme(plot.title = element_text(size=10, face="bold"),axis.title.x = element_text(size=14, face="bold"),axis.title.y = element_text(size=14, face="bold")) + 
+  theme(axis.text.x = element_text(color="black", face="bold", size=14))+
+  theme(axis.text.y = element_text(color="black", face="bold", size=14),legend.key = element_rect(fill = "white", size=12))+ labs(fill = "LRS")
+
+plot7_fem<-ggplotRegression(lm(LRS ~ Shannon, data = females_lrs_subset))+
+  geom_point(width = 0.1, size = 1) +
+  geom_smooth(method='lm', col = "black", fill="cyan", se=TRUE) +
+  theme_classic()+
+  ylab("Lifetime reproductive success in females")+xlab("Shannon Diversity Index") + 
+  theme(plot.title = element_text(size=10, face="bold"),axis.title.x = element_text(size=14, face="bold"),axis.title.y = element_text(size=14, face="bold")) + 
+  theme(axis.text.x = element_text(color="black", face="bold", size=14))+
+  theme(axis.text.y = element_text(color="black", face="bold", size=14),legend.key = element_rect(fill = "white", size=12))+ labs(fill = "LRS")
+
+LRS_fig<-ggarrange(plot7, plot7_fem, 
+                    labels = c("A", "B"),
+                    ncol = 2, nrow = 1)
+
+fit9_9<-lmer(LRS ~ Chao1 + body_condition + age_group_exact + HD + (1|AREA), data = males_lrs_subset)
+vif(fit9_9)
+summary(fit9_9)
+anova(fit9_9, type = 3) #### Chao1 is not significant
+
+
+#### Add analysis to check whether sex contributes to differences in GM diversity
+
+fit10<-lmer(Shannon~sex+body_condition+age_group_exact+(1|area), data=data)
+vif(fit10)
+summary(fit10)
+anova(fit10, type=3)
+
+fit11<-lmer(Chao1~body_condition+age_group_exact+(1|area), data=males)
+vif(fit10)
+summary(fit11)
+anova(fit11, type=3)
+
+test_age <- lm(Shannon ~ age_group_exact, data = males)
+summary(test_age)
+tukey_test <- anova(test_age)
+tukey2 <- emmeans(test_age, pairwise ~ age_group_exact)
+
+ggplotRegression(lm(body_condition ~ Shannon, data = males))+
+  geom_point(width = 0.1, size = 1) +
+  geom_smooth(method='lm', col = "black", fill="cyan", se=TRUE) +
+  theme_classic()+
+  ylab("Body condition")+xlab("Shannon Diversity Index") + 
+  theme(plot.title = element_text(size=10, face="bold"),axis.title.x = element_text(size=14, face="bold"),axis.title.y = element_text(size=14, face="bold")) + 
+  theme(axis.text.x = element_text(color="black", face="bold", size=14))+
+  theme(axis.text.y = element_text(color="black", face="bold", size=14),legend.key = element_rect(fill = "white", size=12))+ labs(fill = "Body condition")
+
+ggplot(males, aes(x=age_group_exact, y=Shannon)) +
+  theme(panel.background = element_rect(color="black",fill = "white"),panel.grid.major = element_blank(),panel.grid.minor = element_blank())+
+  ylim(0, 5.5)+geom_boxplot(outlier.shape = NA)+
+  theme(axis.text=element_text(size=12, face="bold"))+ 
+  xlab("Age group")+ylab("Shannon Diversity Index") + 
+  theme(plot.title = element_text(size=12, face="bold"), axis.title.x = element_text(size=12),axis.title.y = element_text(size=12)) + 
+  theme(axis.text.x = element_text(color="black", face="bold"))+
+  theme(axis.title.y.left = element_text(size=12, face="bold"))+
+  theme(legend.title = element_text(color="black", face="bold"))+
+  theme(axis.title.x.bottom = element_text(color="black", face="bold", size=14))+
+  theme(axis.text.y = element_text(color="black", face="bold"),legend.key = element_rect(fill = "white", size=12))+ labs(fill = "Age group")+
+  scale_fill_viridis_d()
+
+fit12<-lmer(Chao1~body_condition+age_group_exact+(1|area), data=females)
+vif(fit12)
+summary(fit12)
+anova(fit12, type=3)
+
+
+## BETA DIVERSITY
+
+### First make sure physeq object and metadata match the diversity analyses data --> Remove the samples that were deleted in rarefying + duplicates
+### Example code with individual lines for each sample that I would like to remove:
+samples_toRemove <- c("CF_198_S543_L002_R1_001.fastq.gz", "CF_90_S431_L002_R1_001.fastq.gz")
+### Removes the samples from the physeq object
+ps_beta<-subset_samples(physeq, !(samples_names %in% samples_toRemove))
+ps_beta<-subset_samples(physeq, sample_or_duplicate == "sample")
+ps_beta_alt<-subset_samples(ps_beta, AREA != "PA" | area != "PA")
+
+
+### Read in metadata
+betadata <- read_excel("betadata.xlsx", col_types = c("numeric", 
+                                                   "numeric", "numeric", "numeric", "numeric", 
+                                                   "numeric", "numeric", "numeric", "text", 
+                                                   "text", "text", "text", "text", "text", 
+                                                   "numeric", "text", "text", "text", "text", 
+                                                   "text", "text", "text", "text", "numeric", 
+                                                   "text", "text", "numeric", "numeric", 
+                                                   "numeric", "numeric", "text", "text", 
+                                                   "text", "text", "numeric", "text", "text", 
+                                                   "text", "numeric", "text", "text", "numeric", 
+                                                   "numeric", "numeric", "numeric", "text", 
+                                                   "numeric", "text", "numeric", "numeric", 
+                                                   "numeric", "numeric", "text", "text"))
+
+betadata$ring<- factor(betadata$ring) ### bird ID
+betadata$area<- factor(betadata$area) ### sampling area
+betadata$AREA<- factor(betadata$AREA) ### sampling area
+betadata$sex<- factor(betadata$sex)
+betadata$survival<- factor(betadata$survival)
+betadata$age_group_exact<- factor(betadata$age_group_exact) #### Groups are  1) 1 year olds, 2) 1.5-4 year olds, and 3) 4.5 and higher
+
+betadata<-subset(betadata, betadata$sample_or_duplicate != "duplicate")
+
+attach(betadata)
+
+## Calculate body condition index for birds tarsus ~ wing lenght
+bodyc<-lm(tarsus ~ weight, data=betadata) ####extract individual residuals
+summary(bodyc) #Prints rediduals per birdID
+###Extract residuals
+body_c<-bodyc$residuals
+plot(fitted(bodyc), body_c)
+abline(0,0)
+betadata<-add_residuals(betadata, bodyc, var="body_condition")
+
+### SUBSET for survival and LRS analyses to match the alpha diversity analyses
+beta_subset<-subset(betadata, betadata$area != "PA" | betadata$AREA != "PA")
+
+##### females only
+beta_female_subset<-subset(betadata, betadata$sex == "female") #### N=124 females
+beta_female_subset<-subset(beta_female_subset, beta_female_subset$area != "PA" | beta_female_subset$AREA != "PA")
+ps_female<-subset_samples(physeq, sex == "female")
+ps_female_alt<-subset_samples(ps_female, AREA != "PA" | area != "PA")
+
+##### males only
+beta_male_subset<-subset(betadata, betadata$sex == "male") #### N=63 males
+beta_male_subset<-subset(beta_male_subset, beta_male_subset$area != "PA" | beta_male_subset$AREA != "PA")
+ps_male<-subset_samples(physeq, sex == "male")
+ps_male_alt<-subset_samples(ps_male, AREA != "PA" | area != "PA")
+
+## BETADISPERSION: tests for differences in variance between samples in the same group and check if PERMANOVA is a good fit
+### All
+bray<-phyloseq::distance(ps_beta, method="bray")
+## Test among-population differences. P should not be significant = no differences among groups!
+bray_all<-betadisper(bray, betadata$sex)
+permutest(bray_all) ##### P=0.099 --> sex dependent differences are present
+
+betamelt <- psmelt(ps_beta)
+
+### Divide LRS into two groups for plotting purposes
+##### Less than median and more than median. Median is 4 so group 1 is 4 and below and group 2 is above 4.
+
+is.factor(sample_data(ps_beta)$LRS)
+#Make a new factor column if needed by cloning the wanted column into a factor one
+sample_data(ps_beta)$success <- as.factor(sample_data(ps_beta)$LRS)
+#Check if it worked
+levels(sample_data(ps_beta)$success)
+#Rename
+# Change labels
+levels(sample_data(ps_beta)$success) = c("", "1", "1", "2", "2", "2", "2", "2", "1", "1", "1", "2", "2", "2", "2", "2")
+#Check
+sample_data(ps_beta)[1:10]
+
+## Make NMDS plots to visualise results
+### Check consistency of results with different metrics: BC, Weighted unifrac and unweighted unifrac
+
+nmds_wunifrac <- ordinate(ps_beta, method="NMDS", distance="wunifrac") ### weighted unifrac takes into account both absolute abundance and evenness of taxa --> so it is scaled
+nmds_unifrac <- ordinate(ps_beta, method="NMDS", distance="uunifrac")
+nmds_bray <- ordinate(ps_beta, method="NMDS", distance="bray") ## The most robust of the ordinations
+
+#### Discard NAs for the plot below
+ps_beta_lrs <- subset_samples(ps_beta, success != "")
+nmds_bray_lrs <- ordinate(ps_beta_lrs, method="NMDS", distance="bray")
+
+###Plot has all data and sex + survival is indicated and 95 ellipses added. 
+#### Bray-Curtis NMDS
+bray_plot<- plot_ordination(ps_beta, nmds_bray)+theme(panel.border = element_rect(colour = "black", fill=NA, size=1),panel.background = element_rect(fill = "white"),panel.grid.major = element_blank(),panel.grid.minor = element_blank())+ 
+  theme(text = element_text(size=10))+ geom_point(aes(shape=survival, fill=sex), size=3)+
+  scale_shape_manual(values = c(21, 24))+
+  scale_fill_manual(values=c(NA, "black"), guide=guide_legend(override.aes = list(shape=21)))+
+  theme(legend.title=element_blank())+ 
+  scale_colour_viridis_d(option="D")+
+  theme(legend.key=element_blank(), legend.text=element_text(color="black", size=12))+labs(shape="Survival", fill="Sex")+ 
+  theme(legend.title = element_text(color="black", size=12,face="bold"))+ guides(colour = guide_legend(order = 1),shape = guide_legend(order = 2))+
+  theme(axis.text.x = element_text(color="black", size=14,face="bold"))+
+  theme(axis.text.y = element_text(color="black", size=14,face="bold"))+
+  theme(axis.title.x = element_text(color="black", size=14,face="bold"))+
+  theme(axis.title.y = element_text(color="black", size=14,face="bold"))
+print(bray_plot)
+
+### Only survival
+survival_bray_plot<- plot_ordination(ps_beta, nmds_bray)+theme(panel.border = element_rect(colour = "black", fill=NA, size=1),panel.background = element_rect(fill = "white"),panel.grid.major = element_blank(),panel.grid.minor = element_blank())+ 
+  theme(text = element_text(size=10))+ geom_point(aes(shape=survival), size=4)+
+  scale_shape_manual(values = c(2, 19))+
+  scale_fill_manual(values=c(NA, "black"), guide=guide_legend(override.aes = list(shape=21)))+
+  theme(legend.title=element_blank())+ 
+  scale_colour_viridis_d(option="E")+
+  theme(legend.key=element_blank(), legend.text=element_text(color="black", size=12))+labs(shape="Survival")+ 
+  theme(legend.title = element_text(color="black", size=12,face="bold"))+ guides(colour = guide_legend(order = 1),shape = guide_legend(order = 2))+
+  theme(axis.text.x = element_text(color="black", size=14,face="bold"))+
+  theme(axis.text.y = element_text(color="black", size=14,face="bold"))+
+  theme(axis.title.x = element_text(color="black", size=14,face="bold"))+
+  theme(axis.title.y = element_text(color="black", size=14,face="bold"))
+print(survival_bray_plot)
+
+### Add 95 % CI as ellipses to the plot if wanted
+survival_ellipse_bray <- survival_bray_plot + stat_ellipse(aes(color=survival), type = "norm", linetype=1, lwd=1.5, inherit.aes = TRUE) ##### More females, which explains the differences
+survival_ellipse_bray+labs(colour="Survival (95 % CI)")
+
+### Only sex
+sex_bray_plot<- plot_ordination(ps_beta, nmds_bray)+theme(panel.border = element_rect(colour = "black", fill=NA, size=1),panel.background = element_rect(fill = "white"),panel.grid.major = element_blank(),panel.grid.minor = element_blank())+ 
+  theme(text = element_text(size=10))+ geom_point(aes(shape=sex), size=4)+
+  scale_shape_manual(values = c(2, 19))+
+  scale_fill_manual(values=c(NA, "black"), guide=guide_legend(override.aes = list(shape=21)))+
+  theme(legend.title=element_blank())+ 
+  scale_colour_viridis_d(option="E")+
+  theme(legend.key=element_blank(), legend.text=element_text(color="black", size=12))+labs(shape="Sex")+ 
+  theme(legend.title = element_text(color="black", size=12,face="bold"))+ guides(colour = guide_legend(order = 1),shape = guide_legend(order = 2))+
+  theme(axis.text.x = element_text(color="black", size=14,face="bold"))+
+  theme(axis.text.y = element_text(color="black", size=14,face="bold"))+
+  theme(axis.title.x = element_text(color="black", size=14,face="bold"))+
+  theme(axis.title.y = element_text(color="black", size=14,face="bold"))
+print(sex_bray_plot)
+
+### Add 95 % CI as ellipses to the plot if wanted
+sex_ellipse_bray <- sex_bray_plot + stat_ellipse(aes(color=sex), type = "norm", linetype=1, lwd=1.5, inherit.aes = TRUE) ##### More females, which explains the differences
+sex_ellipse_bray+labs(colour="Sex (95 % CI)")
+
+#### Combine sex and survival NMDS plots
+beta_figure_1<-ggarrange(sex_ellipse_bray, survival_ellipse_bray,
+                        labels = c("A", "B"),
+                        ncol = 2, nrow = 1)
+
+## Plot for LRS
+LRS_beta_plot<- plot_ordination(ps_beta_lrs, nmds_bray_lrs)+theme(panel.border = element_rect(colour = "black", fill=NA, size=1),panel.background = element_rect(fill = "white"),panel.grid.major = element_blank(),panel.grid.minor = element_blank())+ 
+  theme(text = element_text(size=10))+ geom_point(aes(shape=success), size=4)+
+  scale_shape_manual(values = c(2, 19))+
+  #scale_fill_manual(values=c(NA, "black", "grey"), guide=guide_legend(override.aes = list(shape=1)))+
+  theme(legend.title=element_blank())+ 
+  scale_colour_viridis_d(option="D")+
+  theme(legend.key=element_blank(), legend.text=element_text(color="black", size=12))+labs(shape="LRS (median = 4)")+ 
+  theme(legend.title = element_text(color="black", size=12,face="bold"))+ guides(colour = guide_legend(order = 1),shape = guide_legend(order = 2))+
+  theme(axis.text.x = element_text(color="black", size=14,face="bold"))+
+  theme(axis.text.y = element_text(color="black", size=14,face="bold"))+
+  theme(axis.title.x = element_text(color="black", size=14,face="bold"))+
+  theme(axis.title.y = element_text(color="black", size=14,face="bold"))
+print(LRS_beta_plot)
+
+### Add 95 % CI as ellipses to the plot if wanted
+ellipse_bray_lrs <- LRS_beta_plot + stat_ellipse(aes(color=success), type = "norm", linetype=1, lwd=1.5, inherit.aes = TRUE) ##### More females, which explains the differences
+ellipse_bray_lrs<-ellipse_bray_lrs+stat_ellipse(aes(color=success), type = "norm", linetype=1, lwd=1.5, inherit.aes = TRUE)
+ellipse_bray_lrs+labs(colour="LRS (95 % CI)")
+
+#### Combine plots for NMDS
+
+beta_figures<-ggarrange(ellipse_bray, ellipse_bray_lrs,
+                   labels = c("A", "B"),
+                   ncol = 2, nrow = 1)
+
+### Female
+fbray<-phyloseq::distance(ps_female, method="bray")
+## Test among-population differences. P should not be significant = no differences among groups!
+bray_female<-betadisper(fbray, female$survival)
+permutest(bray_female)
+
+### PERMANOVAS
+
+#### survival
+perm<-how(nperm = 9999)
+set.seed(111)
+adonis2(formula = phyloseq::distance(ps_beta_alt, permutations = perm, method = "bray")~survival+sex+body_condition+age_group_exact+area, data = beta_subset, na.action=na.exclude)
+
+perm<-how(nperm = 9999)
+set.seed(111)
+adonis2(formula = phyloseq::distance(ps_female_alt, permutations = perm, method = "bray")~survival+body_condition+age_group_exact+area, data = beta_female_subset, na.action=na.exclude)
+
+perm<-how(nperm = 9999)
+set.seed(111)
+adonis2(formula = phyloseq::distance(ps_male_alt, permutations = perm, method = "bray")~survival+body_condition+age_group_exact+area, data = beta_male_subset, na.action=na.exclude)
+
+### ARS
+perm<-how(nperm = 9999)
+set.seed(111)
+adonis2(formula = phyloseq::distance(ps_beta, permutations = perm, method = "bray")~fledge+sex+body_condition+age_group_exact+area+HD, data = betadata, na.action=na.exclude)
+
+perm<-how(nperm = 9999)
+set.seed(111)
+adonis2(formula = phyloseq::distance(ps_female_alt, permutations = perm, method = "bray")~fledge+body_condition+age_group_exact+area+HD, data = beta_female_subset, na.action=na.exclude)
+
+perm<-how(nperm = 9999)
+set.seed(111)
+adonis2(formula = phyloseq::distance(ps_male_alt, permutations = perm, method = "bray")~fledge+body_condition+age_group_exact+area+HD, data = beta_male_subset, na.action=na.exclude)
+
+### LRS
+perm<-how(nperm = 9999)
+set.seed(111)
+adonis2(formula = phyloseq::distance(ps_beta_alt, permutations = perm, method = "bray")~LRS+sex+body_condition+age_group_exact+area+HD, data = beta_subset, na.action=na.exclude)
+
+perm<-how(nperm = 9999)
+set.seed(111)
+adonis2(formula = phyloseq::distance(ps_male_alt, permutations = perm, method = "bray")~LRS+body_condition+age_group_exact+area+HD, data = beta_male_subset, na.action=na.exclude)
+
+perm<-how(nperm = 9999)
+set.seed(111)
+adonis2(formula = phyloseq::distance(ps_female_alt, permutations = perm, method = "bray")~LRS+body_condition+age_group_exact+area+HD, data = beta_female_subset, na.action=na.exclude)
+
+### Test NMDS
+ord.nmds.wunifrac <- ordinate(ps_female, method="NMDS", distance="wunifrac")
+ord.nmds.uunifrac <- ordinate(ps_female, method="NMDS", distance="uunifrac")
+female_bray <- ordinate(ps_female, method="NMDS", distance="bray")
+
+female_bray_plot<-plot_ordination(ps_female, female_bray) +theme(panel.border = element_rect(colour = "black", fill=NA, size=1),panel.background = element_rect(fill = "white"),panel.grid.major = element_blank(),panel.grid.minor = element_blank())+ 
+  theme(text = element_text(size=10))+ geom_point(aes(color=AREA), size=3) + theme(legend.title=element_blank())+ 
+  scale_colour_viridis_d(option="D")+
+  theme(legend.key=element_blank(), legend.text=element_text(color="black", size=14))+  labs(color="Area")+ 
+  theme(legend.title = element_text(color="black", size=14,face="bold"))+ guides(colour = guide_legend(order = 1),shape = guide_legend(order = 2))+
+  theme(axis.text.x = element_text(color="black", size=14,face="bold"))+
+  theme(axis.text.y = element_text(color="black", size=14,face="bold"))
+
+#### ellipses don't work here as there are too many areas and it gets confusing.
+
+
+### Male
+mbray<-phyloseq::distance(ps_male, method="bray")
+## Test among-population differences. P should not be significant = no differences among groups!
+bray_male<-betadisper(mbray, male$survival)
+permutest(bray_male)
+
+### PERMANOVA
+perm<-how(nperm = 9999)
+set.seed(444)
+adonis2(formula = phyloseq::distance(ps_male, permutations = perm, method = "bray")~survival+body_condition+age_group_exact, data = male, na.action=na.exclude)
+#### Age group is significant! 5 % of differences in composition is explained by age group
+
+perm<-how(nperm = 9999)
+set.seed(555)
+adonis2(formula = phyloseq::distance(ps_male, permutations = perm, method = "bray")~fledge+body_condition+age_group_exact, data = male, na.action=na.exclude)
+
+perm<-how(nperm = 9999)
+set.seed(666)
+adonis2(formula = phyloseq::distance(ps_male, permutations = perm, method = "bray")~LRS+body_condition+age_group_exact, data = male, na.action=na.exclude)
+
+### Age group for males-only data
+is.factor(sample_data(ps_male)$AGEM)
+#Make a new factor column if needed by cloning the wanted column into a factor one
+sample_data(ps_male)$agegroup <- as.factor(sample_data(ps_male)$AGEM)
+#Check if it worked
+levels(sample_data(ps_male)$agegroup)
+#Rename
+# Change labels
+levels(sample_data(ps_male)$agegroup) = c("1", "2", "2", "2", "2", "2", "3", "3", "3")
+#Check
+sample_data(ps_male)[1:10]
+
+### Test NMDS
+nmds_male <- ordinate(ps_male, method="NMDS", distance="bray")
+uunifrac_male <- ordinate(ps_male, method="NMDS", distance="uunifrac")
+wunifrac_male <- ordinate(ps_male, method="NMDS", distance="wunifrac")
+
+
+#### Plot males-only and age groups
+male_bray_plot<-plot_ordination(ps_male, nmds_male) +theme(panel.border = element_rect(colour = "black", fill=NA, size=1),panel.background = element_rect(fill = "white"),panel.grid.major = element_blank(),panel.grid.minor = element_blank())+ 
+  theme(text = element_text(size=10))+ geom_point(aes(shape=agegroup), size=3)+
+  theme(legend.title=element_blank())+ 
+  scale_colour_viridis_d(option="C")+
+  theme(legend.title=element_blank())+ 
+  theme(legend.key=element_blank(), legend.text=element_text(color="black", size=12))+labs(shape="Age group")+ 
+  theme(legend.title = element_text(color="black", size=12,face="bold"))+ guides(colour = guide_legend(order = 1),shape = guide_legend(order = 2))+
+  theme(axis.text.x = element_text(color="black", size=14,face="bold"))+
+  theme(axis.text.y = element_text(color="black", size=14,face="bold"))+
+  theme(axis.title.x = element_text(color="black", size=14,face="bold"))+
+  theme(axis.title.y = element_text(color="black", size=14,face="bold"))
+
+### Add 95 % CI as ellipses to the plot if wanted
+ellipse_male_bray <- male_bray_plot + stat_ellipse(aes(color=agegroup), type = "norm", linetype=2, lwd=2, inherit.aes = TRUE) ##### More females, which explains the differences
+
+
+
+## DESEq2 for survival: all, females and males
+
+###All first
+data_dds = phyloseq_to_deseq2(ps_beta_alt, ~ survival) #whatever variable you want to look at
+#### calculate geometric means prior to estimate size factors
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(data_dds), 1, gm_mean)
+data_dds = estimateSizeFactors(data_dds, geoMeans = geoMeans)
+data_dds = DESeq(data_dds, fitType="local")
+
+####plot results
+theme_set(theme_bw())
+
+#### survived vs not survived
+#### left one is positive and right one is negative log2fold
+data_res<- results(data_dds, contrast=c("survival","1","0")) # which levels of the variable you want to contrast. For ex. enlarged and reduced within variable compartment
+data_res= data_res[order(data_res$padj, na.last=NA), ]
+alpha = 0.05 # set this to 0.05 to for significance. I use 0.01 as 0.05 gave too many genera to plot
+data_tab = data_res[data_res$padj < alpha, ]
+data_tab = cbind(as(data_tab, "data.frame"), as(tax_table(ps_beta)[rownames(data_tab), ], "matrix"))
+data_x = tapply(data_tab$log2FoldChange, data_tab$Genus, function(data_x) max(data_x))
+data_x = sort(data_x, TRUE)
+data_tab$Genus = factor(as.character(data_tab$Genus), levels=names(data_x))
+
+# Results table
+write_xlsx(data_tab,"~/Desktop/flycatchers/deseq2_all.xlsx")
+
+summary(data_tab)
+## survived is on the right and not survived on the left of the graph
+deseq_all_plot<- ggplot(data_tab, aes(y=Family, x=log2FoldChange, color=Phylum)) + 
+  geom_vline(xintercept = 0.0, color = "gray", linewidth = 0.5) +
+  geom_point(size=3) +theme(panel.border = element_rect(colour = "black", fill=NA, linewidth=1),panel.background = element_rect(fill = "white"))+ 
+  theme(legend.title = element_text(color="black", size=12,face="bold"))+theme(legend.text = element_text(color="black", size=12, face="bold"))+
+  guides(colour = guide_legend(order = 1),shape = guide_legend(order = 2))+
+  theme(axis.text.x = element_text(color="black", size=14,face="bold"))+
+  theme(axis.text.y = element_text(color="black", size=14,face="bold"))+
+  theme(axis.title.x = element_text(color="black", size=14,face="bold"))+
+  theme(axis.title.y = element_text(color="black", size=14,face="bold"))+
+  scale_colour_viridis_d()
+#scale_colour_manual(values=colours)
+
+## Females
+
+female_dds = phyloseq_to_deseq2(ps_female_alt, ~ survival) #whatever variable you want to look at
+#### calculate geometric means prior to estimate size factors
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(female_dds), 1, gm_mean)
+female_dds = estimateSizeFactors(female_dds, geoMeans = geoMeans)
+female_dds = DESeq(female_dds, fitType="local")
+
+####plot results
+theme_set(theme_bw())
+
+#### survived vs not survived
+#### left one is positive and right one is negative log2fold
+female_res<- results(female_dds, contrast=c("survival","1","0")) # which levels of the variable you want to contrast. For ex. enlarged and reduced within variable compartment
+female_res= female_res[order(female_res$padj, na.last=NA), ]
+alpha = 0.05 # set this to 0.05 to for significance. I use 0.01 as 0.05 gave too many genera to plot
+female_tab = female_res[female_res$padj < alpha, ]
+female_tab = cbind(as(female_tab, "data.frame"), as(tax_table(ps_female)[rownames(female_tab), ], "matrix"))
+female_x = tapply(female_tab$log2FoldChange, female_tab$Genus, function(female_x) max(female_x))
+female_x = sort(female_x, TRUE)
+female_tab$Genus = factor(as.character(female_tab$Genus), levels=names(female_x))
+
+# Results table
+write_xlsx(female_tab,"~/Desktop/flycatchers/deseq2_females.xlsx")
+
+summary(female_tab)
+### survived is on the right and not survived on the left of the graph
+deseq_female_plot<- ggplot(female_tab, aes(y=Family, x=log2FoldChange, color=Phylum)) + 
+  geom_vline(xintercept = 0.0, color = "gray", linewidth = 0.5) +
+  geom_point(size=3) +theme(panel.border = element_rect(colour = "black", fill=NA, linewidth=1),panel.background = element_rect(fill = "white"))+ 
+  theme(legend.title = element_text(color="black", size=12,face="bold"))+theme(legend.text = element_text(color="black", size=12, face="bold"))+
+  guides(colour = guide_legend(order = 1),shape = guide_legend(order = 2))+
+  theme(axis.text.x = element_text(color="black", size=14,face="bold"))+
+  theme(axis.text.y = element_text(color="black", size=14,face="bold"))+
+  theme(axis.title.x = element_text(color="black", size=14,face="bold"))+
+  theme(axis.title.y = element_text(color="black", size=14,face="bold"))+
+  scale_colour_viridis_d()
+
+## Males
+
+male_dds = phyloseq_to_deseq2(ps_male_alt, ~ survival) #whatever variable you want to look at
+#### calculate geometric means prior to estimate size factors
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(male_dds), 1, gm_mean)
+male_dds = estimateSizeFactors(male_dds, geoMeans = geoMeans)
+male_dds = DESeq(male_dds, fitType="local")
+
+####plot results
+theme_set(theme_bw())
+
+#### survived vs not survived
+#### left one is positive and right one is negative log2fold
+male_res<- results(male_dds, contrast=c("survival","1","0")) # which levels of the variable you want to contrast. For ex. enlarged and reduced within variable compartment
+male_res= male_res[order(male_res$padj, na.last=NA), ]
+alpha = 0.05 # set this to 0.05 to for significance. I use 0.01 as 0.05 gave too many genera to plot
+male_tab = male_res[male_res$padj < alpha, ]
+male_tab = cbind(as(male_tab, "data.frame"), as(tax_table(ps_male)[rownames(male_tab), ], "matrix"))
+male_x = tapply(male_tab$log2FoldChange, male_tab$Genus, function(male_x) max(male_x))
+male_x = sort(male_x, TRUE)
+male_tab$Genus = factor(as.character(male_tab$Genus), levels=names(male_x))
+
+# Results table
+write_xlsx(male_tab,"~/Desktop/flycatchers/deseq2_males.xlsx")
+
+summary(male_tab)
+## survived is on the right and not survived on the left of the graph
+deseq_male_plot<- ggplot(male_tab, aes(y=Family, x=log2FoldChange, color=Phylum)) + 
+  geom_vline(xintercept = 0.0, color = "gray", linewidth = 0.5) +
+  geom_point(size=3) +theme(panel.border = element_rect(colour = "black", fill=NA, linewidth=1),panel.background = element_rect(fill = "white"))+ 
+  theme(legend.title = element_text(color="black", size=12,face="bold"))+theme(legend.text = element_text(color="black", size=12, face="bold"))+
+  guides(colour = guide_legend(order = 1),shape = guide_legend(order = 2))+
+  theme(axis.text.x = element_text(color="black", size=14,face="bold"))+
+  theme(axis.text.y = element_text(color="black", size=14,face="bold"))+
+  theme(axis.title.x = element_text(color="black", size=14,face="bold"))+
+  theme(axis.title.y = element_text(color="black", size=14,face="bold"))+
+  scale_colour_viridis_d()
+
+#### Combine plots
+
+deseq_plots<-ggarrange(deseq_male_plot, deseq_female_plot, deseq_all_plot,
+          labels = c("A", "B", "C"),
+          ncol = 1, nrow = 3)
+
+## Excursion in the differential abundance of female and male collared flycatchers
+
+sex_dds = phyloseq_to_deseq2(ps_beta, ~ sex) #whatever variable you want to look at
+#### calculate geometric means prior to estimate size factors
+gm_mean = function(x, na.rm=TRUE){
+  exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))
+}
+geoMeans = apply(counts(sex_dds), 1, gm_mean)
+sex_dds = estimateSizeFactors(sex_dds, geoMeans = geoMeans)
+sex_dds = DESeq(sex_dds, fitType="local")
+
+####plot results
+theme_set(theme_bw())
+
+#### winter vs summer
+#### left one is positive and right one is negative log2fold
+sex_res<- results(sex_dds, contrast=c("sex","male","female")) # which levels of the variable you want to contrast. For ex. enlarged and reduced within variable compartment
+sex_res= sex_res[order(sex_res$padj, na.last=NA), ]
+alpha = 0.05 # set this to 0.05 to for significance. I use 0.01 as 0.05 gave too many genera to plot
+sex_tab = sex_res[sex_res$padj < alpha, ]
+sex_tab = cbind(as(sex_tab, "data.frame"), as(tax_table(ps_beta)[rownames(sex_tab), ], "matrix"))
+sex_x = tapply(sex_tab$log2FoldChange, sex_tab$Genus, function(sex_x) max(sex_x))
+sex_x = sort(sex_x, TRUE)
+sex_tab$Genus = factor(as.character(sex_tab$Genus), levels=names(sex_x))
+
+# Results table
+write_xlsx(sex_tab,"~/Desktop/flycatchers/deseq2_sexcomparison.xlsx")
+
+summary(sex_tab)
+## male is on the right and women on the left of the graph
+deseq_sex_plot<- ggplot(sex_tab, aes(y=Family, x=log2FoldChange, color=Phylum)) + 
+  geom_vline(xintercept = 0.0, color = "gray", linewidth = 0.5) +
+  geom_point(size=3) +theme(panel.border = element_rect(colour = "black", fill=NA, linewidth=1),panel.background = element_rect(fill = "white"))+ 
+  theme(text = element_text(size=10))+
+  theme(axis.text.x = element_text(hjust = 0, vjust=0.5, size=10, color="black"), axis.text.y = element_text(size=11, color="black")) +
+  ggtitle(" ")+
+  scale_colour_viridis_d()
+
+
